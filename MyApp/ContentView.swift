@@ -109,9 +109,23 @@ private struct YouTubeWebView: UIViewRepresentable {
     let url: URL?
     let onStatus: (DebugStatus) -> Void
 
+    // MARK: Data saver settings (only used while on cellular)
+
     /// Highest video quality used while on mobile data. Lower = less data.
     /// Options: "tiny" (144p), "small" (240p), "medium" (360p), "large" (480p), "hd720" (720p)
     private static let maxQuality = "small"
+
+    /// Swap the big video thumbnails for small ones (about 5x fewer bytes per thumbnail).
+    private static let smallThumbnails = true
+
+    /// Hide the "Shorts" rows, which are made of many extra thumbnails and short videos.
+    private static let hideShorts = true
+
+    /// Hide the "up next" list beside / under the video (dozens of thumbnails).
+    private static let hideRecommendations = true
+
+    /// Hide the comments section (avatars and a lot of extra requests).
+    private static let hideComments = true
 
     /// Set to true to test the data saver on Wi-Fi or in the Simulator.
     private static let forceDataSaver = false
@@ -309,25 +323,75 @@ private struct YouTubeWebView: UIViewRepresentable {
         )
     }
 
-    /// Caps the video quality, hides animated previews and turns off autoplay, but only while
-    /// `window.__dataSaver` is true (on cellular). On Wi-Fi it undoes what it changed.
+    /// Caps the video quality, shrinks thumbnails, hides heavy page sections and turns off autoplay,
+    /// but only while `window.__dataSaver` is true (on cellular). On Wi-Fi it undoes what it can.
     private func dataSaverScript(enabled: Bool) -> WKUserScript {
         let source = """
         (function () {
             var QUALITY = '\(Self.maxQuality)';
+            var SMALL_THUMBNAILS = \(Self.smallThumbnails);
+            var HIDE_SHORTS = \(Self.hideShorts);
+            var HIDE_RECOMMENDATIONS = \(Self.hideRecommendations);
+            var HIDE_COMMENTS = \(Self.hideComments);
+
             var lastVideo = null;
             var attempts = 0;
 
             window.__dataSaver = \(enabled);
 
-            // Hides the animated video previews on the home page and in search results.
+            // Page sections that cost a lot of data. Switched on and off with the data saver.
+            var css = 'ytd-video-preview { display: none !important; }';
+            if (HIDE_SHORTS) {
+                css += 'ytd-reel-shelf-renderer, ytd-rich-shelf-renderer[is-shorts] { display: none !important; }';
+            }
+            if (HIDE_RECOMMENDATIONS) {
+                css += 'ytd-watch-next-secondary-results-renderer { display: none !important; }';
+            }
+            if (HIDE_COMMENTS) {
+                css += 'ytd-comments#comments, #comments { display: none !important; }';
+            }
             var style = document.createElement('style');
-            style.textContent = `
-                ytd-video-preview {
-                    display: none !important;
-                }
-            `;
+            style.textContent = css;
             document.head.appendChild(style);
+
+            // Small thumbnails: swap the large image for the 320x180 version.
+            var THUMBNAIL = /^https:\\/\\/i\\.ytimg\\.com\\/vi(?:_webp)?\\/([^\\/]+)\\//;
+
+            function shrinkThumbnail(img) {
+                if (!SMALL_THUMBNAILS || !window.__dataSaver) { return; }
+                var src = img.getAttribute('src');
+                if (!src) { return; }
+                var match = src.match(THUMBNAIL);
+                if (!match) { return; }
+                var small = 'https://i.ytimg.com/vi/' + match[1] + '/mqdefault.jpg';
+                if (src !== small) { img.setAttribute('src', small); }
+            }
+
+            function shrinkIn(node) {
+                if (!node || node.nodeType !== 1) { return; }
+                if (node.tagName === 'IMG') { shrinkThumbnail(node); }
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('img').forEach(shrinkThumbnail);
+                }
+            }
+
+            if (SMALL_THUMBNAILS) {
+                new MutationObserver(function (mutations) {
+                    if (!window.__dataSaver) { return; }
+                    mutations.forEach(function (mutation) {
+                        if (mutation.type === 'attributes') {
+                            shrinkThumbnail(mutation.target);
+                        } else {
+                            mutation.addedNodes.forEach(shrinkIn);
+                        }
+                    });
+                }).observe(document.documentElement, {
+                    subtree: true,
+                    childList: true,
+                    attributes: true,
+                    attributeFilter: ['src']
+                });
+            }
 
             function getPlayer() {
                 var player = document.getElementById('movie_player');
