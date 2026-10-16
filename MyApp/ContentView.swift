@@ -3,30 +3,13 @@ import SwiftUI
 import WebKit
 
 struct ContentView: View {
-    /// Shows a small test panel at the bottom with the network type, the data saver mode
-    /// and the quality YouTube is actually playing. Set to false to hide it.
-    private let showDebugOverlay = true
-
-    @State private var status = DebugStatus()
-
     var body: some View {
         YouTubeWebView(
             url: URL(string: "https://www.youtube.com"),
-            onStatus: { status = $0 }
+            onStatus: { _ in }
         )
+        .ignoresSafeArea()
         .preferredColorScheme(.dark)
-        .overlay(alignment: .bottomLeading) {
-            if showDebugOverlay {
-                Text(status.text)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.white)
-                    .padding(6)
-                    .background(Color.black.opacity(0.75))
-                    .cornerRadius(6)
-                    .padding(6)
-                    .allowsHitTesting(false)
-            }
-        }
     }
 }
 
@@ -145,6 +128,10 @@ private struct YouTubeWebView: UIViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.overrideUserInterfaceStyle = .dark
+        // Fills the areas behind the status bar and home indicator with YouTube's dark background.
+        webView.underPageBackgroundColor = UIColor(red: 15 / 255, green: 15 / 255, blue: 15 / 255, alpha: 1)
+        webView.backgroundColor = webView.underPageBackgroundColor
+        webView.scrollView.backgroundColor = webView.underPageBackgroundColor
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
 
         // The coordinator installs the scripts and loads the page once it knows
@@ -303,6 +290,70 @@ private struct YouTubeWebView: UIViewRepresentable {
             #page-manager {
                 margin-left: 0 !important;
                 width: 100% !important;
+            }
+
+            /* Home feed: one video per row, thumbnails fill the screen width. */
+            ytd-rich-grid-renderer {
+                --ytd-rich-grid-items-per-row: 1 !important;
+                --ytd-rich-grid-posts-per-row: 1 !important;
+                --ytd-rich-grid-item-margin: 0px !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+
+            ytd-rich-grid-renderer #contents,
+            ytd-rich-grid-row #contents {
+                margin: 0 !important;
+                padding-left: 0 !important;
+                padding-right: 0 !important;
+            }
+
+            ytd-rich-item-renderer {
+                width: 100% !important;
+                max-width: 100% !important;
+                margin: 0 0 16px 0 !important;
+            }
+
+            ytd-rich-grid-media,
+            ytd-rich-grid-media ytd-thumbnail,
+            ytd-rich-grid-media a#thumbnail {
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+
+            /* Remove the space YouTube reserves for the side guide and the grid gutters. */
+            ytd-app {
+                --ytd-mini-guide-width: 0px !important;
+                --ytd-persistent-guide-width: 0px !important;
+                --ytd-rich-grid-gutter-margin: 0px !important;
+                --ytd-rich-grid-item-margin: 0px !important;
+                --ytd-rich-grid-items-per-row: 1 !important;
+            }
+
+            ytd-page-manager,
+            ytd-browse,
+            ytd-browse #primary,
+            ytd-two-column-browse-results-renderer {
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+                padding-left: 0 !important;
+                padding-right: 0 !important;
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+
+            ytd-rich-grid-renderer #contents,
+            ytd-rich-grid-renderer ytd-rich-grid-row,
+            ytd-rich-grid-row #contents {
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+
+            ytd-rich-item-renderer #content,
+            ytd-rich-grid-media #dismissible {
+                width: 100% !important;
+                max-width: 100% !important;
+                margin: 0 !important;
             }
         `;
         document.head.appendChild(style);
