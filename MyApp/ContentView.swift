@@ -3,12 +3,53 @@ import SwiftUI
 import WebKit
 
 struct ContentView: View {
+    /// True once the page is scrolled away from the very top (YouTube's bar turns frosted then).
+    @State private var isScrolled = false
+
+    private let barColor = Color(red: 15 / 255, green: 15 / 255, blue: 15 / 255)
+
+    /// Height (in points) of the soft fade at the bottom of the strip, where it overlaps the top
+    /// of YouTube's bar. Raise it for a softer blend, lower it (or use 0) for a sharper edge.
+    private let seamBlend: CGFloat = 22
+
     var body: some View {
-        YouTubeWebView(
-            url: URL(string: "https://www.youtube.com"),
-            onStatus: { _ in }
-        )
-        .ignoresSafeArea()
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                YouTubeWebView(
+                    url: URL(string: "https://www.youtube.com"),
+                    onStatus: { _ in },
+                    onScrolled: { isScrolled = $0 }
+                )
+
+                // Strip behind the status bar / notch that copies YouTube's top bar:
+                // at the top of the page the bar is plain #0f0f0f, once scrolled it is frosted
+                // (blurred page content under rgba(15, 15, 15, 0.75)).
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(barColor.opacity(0.71))
+                        .opacity(isScrolled ? 1 : 0)
+
+                    barColor
+                        .opacity(isScrolled ? 0 : 1)
+                }
+                .animation(.easeInOut(duration: 0.15), value: isScrolled)
+                .frame(height: geometry.safeAreaInsets.top + seamBlend)
+                .mask(
+                    VStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(
+                            colors: [.black, .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: seamBlend)
+                    }
+                )
+                .allowsHitTesting(false)
+            }
+            .ignoresSafeArea()
+        }
         .preferredColorScheme(.dark)
     }
 }
@@ -91,6 +132,7 @@ private nonisolated final class NetworkMonitor {
 private struct YouTubeWebView: UIViewRepresentable {
     let url: URL?
     let onStatus: (DebugStatus) -> Void
+    let onScrolled: (Bool) -> Void
 
     // MARK: Data saver settings (only used while on cellular)
 
@@ -151,6 +193,7 @@ private struct YouTubeWebView: UIViewRepresentable {
         private let monitor = NetworkMonitor()
         private var status = DebugStatus()
         private var hasLoaded = false
+        private var isScrolled = false
 
         init(parent: YouTubeWebView) {
             self.parent = parent
@@ -164,6 +207,7 @@ private struct YouTubeWebView: UIViewRepresentable {
             }
             monitor.start()
             startPollingQuality()
+            startPollingScroll()
         }
 
         private func networkChanged(onCellular: Bool, name: String) {
@@ -198,6 +242,26 @@ private struct YouTubeWebView: UIViewRepresentable {
                     await self.pollQuality()
                     try? await Task.sleep(for: .seconds(1))
                 }
+            }
+        }
+
+        /// Checks about 10 times a second whether the page is scrolled away from the very top.
+        private func startPollingScroll() {
+            Task { [weak self] in
+                while let self {
+                    self.checkScroll()
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+        }
+
+        private func checkScroll() {
+            guard let webView else { return }
+            let scrollView = webView.scrollView
+            let scrolled = scrollView.contentOffset.y > -scrollView.adjustedContentInset.top + 8
+            if scrolled != isScrolled {
+                isScrolled = scrolled
+                parent.onScrolled(scrolled)
             }
         }
 
