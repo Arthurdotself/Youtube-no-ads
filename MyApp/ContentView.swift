@@ -1,3 +1,4 @@
+import AVFAudio
 import Network
 import SwiftUI
 import WebKit
@@ -163,6 +164,8 @@ private struct YouTubeWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
         configuration.allowsInlineMediaPlayback = true
+        // Lets the app resume playback by itself (without a tap) when it goes to the background.
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.allowsPictureInPictureMediaPlayback = true
         configuration.ignoresViewportScaleLimits = false
         // Lets the YouTube fullscreen button use the web Fullscreen API where WebKit supports it.
@@ -208,6 +211,65 @@ private struct YouTubeWebView: UIViewRepresentable {
             monitor.start()
             startPollingQuality()
             startPollingScroll()
+            observeLifecycle()
+        }
+
+        // MARK: Background playback
+
+        private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+        /// Remembers whether a video was playing the moment the app is about to lose focus,
+        /// and resumes it right after the app enters the background (screen lock or home screen).
+        private func observeLifecycle() {
+            let center = NotificationCenter.default
+
+            center.addObserver(
+                forName: UIApplication.willResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.webView?.evaluateJavaScript(
+                        "window.__bgCapture && window.__bgCapture();",
+                        completionHandler: nil
+                    )
+                }
+            }
+
+            center.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.keepPlayingInBackground()
+                }
+            }
+        }
+
+        private func keepPlayingInBackground() {
+            try? AVAudioSession.sharedInstance().setActive(true)
+
+            // Ask iOS for a little extra running time so the retries below can execute.
+            endBackgroundTask()
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "KeepVideoPlaying") { [weak self] in
+                self?.endBackgroundTask()
+            }
+
+            Task { [weak self] in
+                for _ in 0..<15 {
+                    guard let self else { return }
+                    _ = try? await self.webView?.evaluateJavaScript("window.__bgResume && window.__bgResume();")
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                self?.endBackgroundTask()
+            }
+        }
+
+        private func endBackgroundTask() {
+            guard backgroundTask != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
         }
 
         private func networkChanged(onCellular: Bool, name: String) {
@@ -291,9 +353,98 @@ private struct YouTubeWebView: UIViewRepresentable {
 
     private func installScripts(on controller: WKUserContentController, dataSaver: Bool) {
         controller.removeAllUserScripts()
+        controller.addUserScript(backgroundPlaybackScript)
         controller.addUserScript(fullscreenScript)
         controller.addUserScript(sidebarStyleScript)
         controller.addUserScript(dataSaverScript(enabled: dataSaver))
+    }
+
+    /// Keeps the video playing when the screen locks or the app goes to the background.
+    /// YouTube's page listens for the page becoming hidden and pauses the video itself.
+    /// This makes the page always look visible, swallows the visibility events before YouTube
+    /// sees them, and, as a safety net, resumes the video if it gets paused right after the app
+    /// was hidden. A pause you do later (for example from the lock screen) is left alone.
+    private var backgroundPlaybackScript: WKUserScript {
+        let source = """
+        (function () {
+            if (window.__bgPlaybackInstalled) { return; }
+            window.__bgPlaybackInstalled = true;
+
+            var hiddenAt = 0;
+            var wasPlaying = false;
+
+            function currentVideo() {
+                return document.querySelector('video');
+            }
+
+            // Make the page always report that it is visible.
+            function define(target, name, value) {
+                try {
+                    Object.defineProperty(target, name, { get: function () { return value; }, configurable: true });
+                } catch (e) {}
+            }
+            define(Document.prototype, 'hidden', false);
+            define(Document.prototype, 'webkitHidden', false);
+            define(Document.prototype, 'visibilityState', 'visible');
+            define(Document.prototype, 'webkitVisibilityState', 'visible');
+            try {
+                Document.prototype.hasFocus = function () { return true; };
+            } catch (e) {}
+
+            // Called from the app (Swift) as it is about to lose focus / after it enters the background.
+            window.__bgCapture = function () {
+                var video = currentVideo();
+                hiddenAt = Date.now();
+                wasPlaying = !!(video && !video.paused && !video.ended);
+            };
+            window.__bgResume = function () {
+                var video = currentVideo();
+                if (!video || !wasPlaying || !video.paused || video.ended) { return; }
+                if (Date.now() - hiddenAt > 4000) { return; }
+                var promise = video.play();
+                if (promise && promise.catch) { promise.catch(function () {}); }
+            };
+            window.addEventListener('blur', function (event) {
+                event.stopImmediatePropagation();
+            }, true);
+
+            // Swallow the real visibility events so YouTube never reacts to them.
+            function swallow(event) {
+                var video = currentVideo();
+                hiddenAt = Date.now();
+                if (video && !video.paused && !video.ended) { wasPlaying = true; }
+                event.stopImmediatePropagation();
+            }
+            window.addEventListener('visibilitychange', swallow, true);
+            document.addEventListener('visibilitychange', swallow, true);
+            window.addEventListener('webkitvisibilitychange', swallow, true);
+            document.addEventListener('webkitvisibilitychange', swallow, true);
+            window.addEventListener('pagehide', function (event) {
+                var video = currentVideo();
+                hiddenAt = Date.now();
+                wasPlaying = !!(video && !video.paused && !video.ended);
+            }, true);
+
+            // Safety net: if the video pauses right after the app was hidden, resume it.
+            document.addEventListener('pause', function (event) {
+                var video = event.target;
+                if (!video || video.tagName !== 'VIDEO') { return; }
+                if (!wasPlaying || Date.now() - hiddenAt > 2000) { return; }
+                var resume = function () {
+                    var promise = video.play();
+                    if (promise && promise.catch) { promise.catch(function () {}); }
+                };
+                resume();
+                setTimeout(resume, 250);
+            }, true);
+        })();
+        """
+
+        return WKUserScript(
+            source: source,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
     }
 
     /// iPhone WebKit doesn't offer the web Fullscreen API for normal page elements, so YouTube hides
